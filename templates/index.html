@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>CodePen - MediaPipe Face Transform + Three.JS</title>
+    <meta charset="utf-8">
+    <link rel="icon" href="favicon.ico">
+    <link rel="stylesheet" type="text/css"
+        href="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils@0.6/control_utils.css" crossorigin="anonymous">
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils@0.6/control_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3/drawing_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.0/p5.js"></script>
+
+    <script src="https://unpkg.com/three@0.141.0/build/three.min.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/three@0.141.0/examples/js/loaders/GLTFLoader.js" crossorigin="anonymous"></script>
+    <style>
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .abs {
+            position: absolute;
+        }
+
+        a {
+            color: white;
+            text-decoration: none;
+        }
+
+        a:hover {
+            color: lightblue;
+        }
+
+        body {
+            bottom: 0;
+            font-family: "Titillium Web", sans-serif;
+            color: white;
+            left: 0;
+            margin: 0;
+            position: absolute;
+            right: 0;
+            top: 0;
+            transform-origin: 0px 0px;
+            overflow: hidden;
+        }
+
+        .container {
+            position: absolute;
+            background-color: #596e73;
+            width: 100%;
+            max-height: 100%;
+        }
+
+        .input_video {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+        }
+
+        .input_video.selfie {
+            transform: scale(-1, 1);
+        }
+
+        .input_image {
+            position: absolute;
+        }
+
+        .canvas-container {
+            display: flex;
+            height: 100%;
+            width: 100%;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .output_canvas {
+            max-width: 100%;
+            display: block;
+            position: relative;
+            left: 0;
+            top: 0;
+        }
+
+        .logo {
+            bottom: 10px;
+            right: 20px;
+        }
+
+        .logo .title {
+            color: white;
+            font-size: 28px;
+        }
+
+        .logo .subtitle {
+            position: relative;
+            color: white;
+            font-size: 10px;
+            left: -30px;
+            top: 20px;
+        }
+
+        .control-panel {
+            position: absolute;
+            left: 10px;
+            top: 10px;
+        }
+
+        .loading {
+            display: flex;
+            position: absolute;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            left: 0;
+            align-items: center;
+            backface-visibility: hidden;
+            justify-content: center;
+            opacity: 1;
+            transition: opacity 1s;
+        }
+
+        .loading .message {
+            font-size: x-large;
+        }
+
+        .loading .spinner {
+            position: absolute;
+            width: 120px;
+            height: 120px;
+            animation: spin 1s linear infinite;
+            border: 32px solid #bebebe;
+            border-top: 32px solid #3498db;
+            border-radius: 50%;
+        }
+
+        .loaded .loading {
+            opacity: 0;
+        }
+
+        .shoutout {
+            left: 0;
+            right: 0;
+            bottom: 40px;
+            text-align: center;
+            font-size: 24px;
+            position: absolute;
+        }
+
+        @media (max-width: 1024px) {
+            .control-panel {
+                display: none;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    
+    <script src="https://github.com/piercus/kalman-filter/releases/download/v1.10.1/kalman-filter.min.js"></script>
+    <div class="container">
+        <video class="input_video"></video>
+        <div class="canvas-container">
+            <canvas class="output_canvas" width="640px" height="480px">
+            </canvas>
+        </div>
+        <div class="loading">
+            <div class="spinner"></div>
+            <div class="message">
+                Loading
+            </div>
+        </div>
+    </div>
+    <div class="control-panel">
+    </div>
+    
+    <script type="module">
+        const controls = window;
+        const mpFaceMesh = window;
+        const THREE = window.THREE;
+        const mesh = null;
+        import { 
+  FACE_MESH_INDEX_BUFFER, 
+  FACE_MESH_UV  
+} from '/static/facemesh/face_geom.js';
+        import { makeGeometry } from "{{ url_for('static', filename='facemesh/landmarks_helpers.js') }}";
+        const config = {
+            locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+            }
+        };
+        // Our input frames will come from here.
+        const videoElement = document.getElementsByClassName("input_video")[0];
+        const canvasElement = document.getElementsByClassName("output_canvas")[0];
+        const controlsElement = document.getElementsByClassName("control-panel")[0];
+        let faces = null;
+        /**
+         * Solution options.
+         */
+        const solutionOptions = {
+            selfieMode: true,
+            enableFaceGeometry: true,
+            maxNumFaces: 1,
+            refineLandmarks: false,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        };
+        // We'll add this to our control panel later, but we'll save it here so we can
+        // call tick() each time the graph runs.
+        const fpsControl = new controls.FPS();
+        // Optimization: Turn off animated spinner after its hiding animation is done.
+        const spinner = document.querySelector(".loading");
+        spinner.ontransitionend = () => {
+            spinner.style.display = "none";
+        };
+        const smoothingFactor = (te, cutoff) => {
+            const r = 2 * Math.PI * cutoff * te;
+            return r / (r + 1);
+        };
+        const exponentialSmoothing = (a, x, xPrev) => {
+            return a * x + (1 - a) * xPrev;
+        };
+        class OneEuroFilter {
+            constructor({ minCutOff, beta }) {
+                this.minCutOff = minCutOff;
+                this.beta = beta;
+                this.dCutOff = 0.001; // period in milliseconds, so default to 0.001 = 1Hz
+                this.xPrev = null;
+                this.dxPrev = null;
+                this.tPrev = null;
+                this.initialized = false;
+            }
+            reset() {
+                this.initialized = false;
+            }
+            filter(t, x) {
+                if (!this.initialized) {
+                    this.initialized = true;
+                    this.xPrev = x;
+                    this.dxPrev = x.map(() => 0);
+                    this.tPrev = t;
+                    return x;
+                }
+                const { xPrev, tPrev, dxPrev } = this;
+                //console.log("filter", x, xPrev, x.map((xx, i) => x[i] - xPrev[i]));
+                const te = t - tPrev;
+                const ad = smoothingFactor(te, this.dCutOff);
+                const dx = [];
+                const dxHat = [];
+                const xHat = [];
+                for (let i = 0; i < x.length; i++) {
+                    // The filtered derivative of the signal.
+                    dx[i] = (x[i] - xPrev[i]) / te;
+                    dxHat[i] = exponentialSmoothing(ad, dx[i], dxPrev[i]);
+                    // The filtered signal
+                    const cutOff = this.minCutOff + this.beta * Math.abs(dxHat[i]);
+                    const a = smoothingFactor(te, cutOff);
+                    xHat[i] = exponentialSmoothing(a, x[i], xPrev[i]);
+                }
+                // update prev
+                this.xPrev = xHat;
+                this.dxPrev = dxHat;
+                this.tPrev = t;
+                return xHat;
+            }
+        }
+        class EffectRenderer {
+            constructor() {
+                this.VIDEO_DEPTH = 500;
+                this.FOV_DEGREES = 63;
+                this.NEAR = 1;
+                this.FAR = 10000;
+                this.matrixX = [];
+                this.scene = new THREE.Scene();
+                this.filters = new OneEuroFilter({ minCutOff: 0.001, beta: 1 });
+                this.renderer = new THREE.WebGLRenderer({
+                    alpha: true,
+                    antialias: true,
+                    stencilBuffer: true,
+                    canvas: canvasElement,
+                    context: canvasElement.getContext('webgl2')
+                });
+                this.texture = new THREE.TextureLoader().load( "{{ url_for('static', filename='mask.jpeg') }} ");
+
+                this.renderer.outputEncoding = THREE.sRGBEncoding;
+                this.renderer.shadowMap.enabled = false;
+                //this.renderer.gammaFactor = 0; deprecated
+                const targetObject = new THREE.Object3D();
+                targetObject.position.set(0, 0, -1);
+                this.scene.add(targetObject);
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.castShadow = true;
+                directionalLight.position.set(0, 0.25, 0);
+                directionalLight.target = targetObject;
+                this.scene.add(directionalLight);
+                const bounceLight = new THREE.HemisphereLight(0xffffff, 0xffffff, 0.5);
+                this.scene.add(bounceLight);
+                this.faceGroup = new THREE.Group();
+                this.faceGroup.matrixAutoUpdate = false;
+                this.faceGroup.position.set(0,0,0)
+                this.scene.add(this.faceGroup);
+                const loader = new THREE.GLTFLoader();
+
+                
+                loader.load("{{ url_for('static', filename='crown.gltf') }}", (gltf) => {
+                    const scene = gltf.scene;
+                    scene.traverse((node) => {
+                        if (node.isMesh) {
+                            node.renderOrder = 3;
+                        }
+                    });
+
+                    //const bbox = new THREE.Box3().setFromObject(gltf);
+                    //const size = bbox.getSize(new THREE.Vector3());
+                    //gltf.geometry.center();
+                    // 1: L/R 2:U/D 3:f/b
+                    gltf.scene.position.set(0, 10, -7);
+                    gltf.scene.scale.set(12,12,14);
+
+                    loader.load("{{ url_for('static', filename='chin.gltf') }}", (chin) => {
+                    const scene = chin.scene;
+                    scene.traverse((node) => {
+                        if (node.isMesh) {
+                            node.renderOrder = 3;
+                        }
+                    });
+                    // 1: L/R 2:U/D 3:f/b
+                    chin.scene.position.set(0, -6.5, 1);
+                    chin.scene.scale.set(13, 13, 14);
+               
+                //     loader.load("{{ url_for('static', filename='face_mesh.gltf') }}", (face) => {
+                //     const scen1e = face.scene;
+                //     scen1e.traverse((node) => {
+                //         if (node.isMesh) {
+                //             node.renderOrder = 3;
+                //             const texture = new THREE.TextureLoader().load( "{{ url_for('static', filename='mask4.png') }} ");
+                //             const mat = new THREE.MeshBasicMaterial( { map: texture } );
+                //             node.material = mat;
+                //         }
+                //     });
+
+                //    ;
+                //     scen1e.scale.set(100,100,100);
+                //     scen1e.position.set(0,0,10);
+                //     scen1e.rotate(0,0,Math.PI/2)
+                    // 1: L/R 2:U/D 3:f/b
+                   
+                    loader.load("{{ url_for('static', filename='headOccluder.glb') }}", (glt2f) => {
+                        //console.log(glt2f);
+                        const scene2 = glt2f.scene;
+                        scene2.position.set(0, 0, 10);
+                        scene2.scale.set(1.07, 1.05, 1);
+
+                        const oc1 = scene2.children[0];
+                        // const oc1 = scene2.getObjectByName('canonical-face-model');
+                        glt2f.scene.traverse((node) => {
+                            if (node.isMesh) {
+                                node.renderOrder = 1;
+                                const mat =  new THREE.MeshNormalMaterial();
+                                //const texture = new THREE.TextureLoader().load( "{{ url_for('static', filename='mask.jpeg') }} ");
+                                //const mat = new THREE.MeshBasicMaterial( { map: texture } );
+                                //mat.color.set(0x0000ff);
+                                mat.colorWrite = false; //false to hide
+                                node.material = mat;
+                            }
+                        });
+                                                 //this.faceGroup.add(face.scene);
+
+                         this.faceGroup.add(chin.scene);
+                         this.faceGroup.add(gltf.scene);
+                         this.faceGroup.add(scene2);
+                     });
+                 });
+                });
+            
+            // });
+            }
+
+            async render(results) {
+                this.onCanvasDimsUpdate();
+                const image = await createImageBitmap(results.image);
+                const imagePlane = this.createGpuBufferPlane(results.image);
+                this.scene.add(imagePlane);
+
+                if (results.multiFaceGeometry.length > 0) {
+                
+                    const faceGeometry = results.multiFaceGeometry[0];
+                    const poseTransformMatrixData = faceGeometry.getPoseTransformMatrix();
+                    this.faceGroup.matrix.fromArray(this.filters.filter(Date.now(), poseTransformMatrixData.getPackedDataList()));
+                    this.faceGroup.visible = true;
+                }
+                else {
+                    //Lost track of the face.
+                    this.filters.reset();
+                    this.faceGroup.visible = false;
+                }
+              
+                // if (results.multiFaceLandmarks.length > 0) {
+                //     if (faces != null) {
+                //         this.faceGroup.remove(faces);
+                //     }
+
+                //     const landmarks = transformLandmarks(results.multiFaceLandmarks[0]);
+                //     const scaled_landmarks =  scaleLandmark(landmarks, canvasElement.width, canvasElement.height);
+                //     let geometry = new THREE.BufferGeometry();
+                //     let vertices = [];
+                //     let uvs = [];
+                //         for(let i = 0; i < 468; i++) {
+                //           let {x, y, z} = scaled_landmarks[i];
+                //           let vertex =  [x, y, z];
+                //           vertices.push(...vertex);
+                //         }
+                //         for (let j = 0; j < 468; j++) {
+                //           uvs[j * 2] = FACE_MESH_UV[j][0];
+                //           uvs[j * 2 + 1] = FACE_MESH_UV[j][1];
+                //         }
+                //         geometry.setIndex(FACE_MESH_INDEX_BUFFER);
+                //         geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+                //         geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+                //         geometry.computeVertexNormals();
+                //     //}
+                  
+                //     const mat = new THREE.MeshBasicMaterial( { map: this.texture } );
+                //     faces = new THREE.Mesh( geometry, mat);
+                //     const bbox = new THREE.Box3().setFromObject(faces);
+                //     const size = bbox.getSize(new THREE.Vector3());
+                //     faces.geometry.center();
+                //     faces.scale.set( 20/size.x,15/size.x,15/size.x);
+                //     faces.position.set(0,0,-3);
+                //     this.faceGroup.add(faces);
+
+                // }
+                this.renderer.render(this.scene, this.camera);
+                this.scene.remove(imagePlane);            
+            }
+            createGpuBufferPlane(gpuBuffer) {
+                const depth = this.VIDEO_DEPTH;
+                const fov = this.camera.fov;
+                const width = canvasElement.width;
+                const height = canvasElement.height;
+                const aspect = width / height;
+                const viewportHeightAtDepth = 2 * depth * Math.tan(THREE.MathUtils.degToRad(0.5 * fov));
+                const viewportWidthAtDepth = viewportHeightAtDepth * aspect;
+                console.log(viewportHeightAtDepth, viewportWidthAtDepth);
+                const texture = new THREE.CanvasTexture(gpuBuffer);
+                texture.minFilter = THREE.LinearFilter;
+                texture.encoding = THREE.sRGBEncoding;
+                const plane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: texture }));
+                plane.scale.set(viewportWidthAtDepth, viewportHeightAtDepth, 1);
+                plane.position.set(0, 0, -depth);
+                return plane;
+            }
+            onCanvasDimsUpdate() {
+                this.camera = new THREE.PerspectiveCamera(this.FOV_DEGREES, canvasElement.width / canvasElement.height, this.NEAR, this.FAR);
+      
+                this.renderer.setSize(canvasElement.width, canvasElement.height);
+            }
+        }
+        const effectRenderer = new EffectRenderer();
+        function onResults(results) {
+            // Hide the spinner.
+            document.body.classList.add("loaded");
+            // Render the effect.
+            effectRenderer.render(results);
+            // Update the frame rate.
+            fpsControl.tick();
+        }
+        const faceMesh = new mpFaceMesh.FaceMesh(config);
+        faceMesh.setOptions(solutionOptions);
+        faceMesh.onResults(onResults);
+        // Present a control panel through which the user can manipulate the solution
+        // options.
+        new controls.ControlPanel(controlsElement, solutionOptions)
+            .add([
+                new controls.StaticText({ title: "Snapchat filter" }),
+                fpsControl,
+                new controls.Toggle({ title: "Selfie Mode", field: "selfieMode" }),
+                new controls.Toggle({
+                    title: "Face Transform",
+                    field: "enableFaceGeometry"
+                }),
+                new controls.SourcePicker({
+                    onFrame: async (input, size) => {
+                        const aspect = size.height / size.width;
+                        let width, height;
+                        if (window.innerWidth > window.innerHeight) {
+                            height = window.innerHeight;
+                            width = height / aspect;
+                        }
+                        else {
+                            width = window.innerWidth;
+                            height = width * aspect;
+                        }
+                        canvasElement.width = width;
+                        canvasElement.height = height;
+                        await faceMesh.send({ image: input });
+                    }
+                }),
+                new controls.Slider({
+                    title: "Max Number of Faces",
+                    field: "maxNumFaces",
+                    range: [1, 4],
+                    step: 1
+                }),
+                new controls.Toggle({
+                    title: "Refine Landmarks",
+                    field: "refineLandmarks"
+                }),
+                new controls.Slider({
+                    title: "Min Detection Confidence",
+                    field: "minDetectionConfidence",
+                    range: [0, 1],
+                    step: 0.01
+                }),
+                new controls.Slider({
+                    title: "Min Tracking Confidence",
+                    field: "minTrackingConfidence",
+                    range: [0, 1],
+                    step: 0.01
+                })
+            ])
+            .on((x) => {
+                const options = x;
+                videoElement.classList.toggle("selfie", options.selfieMode);
+                faceMesh.setOptions(options);
+            });
+            export const scaleLandmark = (landmark, width, height) => {
+  let { x, y, z } = landmark;
+  return {
+    ...landmark,
+    x: x * width,
+    y: y * height,
+    z: z * width,
+  }
+}
+            export const transformLandmarks = (landmarks) => {
+  if (!landmarks) {
+    return landmarks;
+  }
+
+  let hasVisiblity = !!landmarks.find(l => l.visibility);
+
+  let minZ = 1e-4;
+
+  // currently mediapipe facemesh js
+  // has visibility set to undefined
+  // so we use a heuristic to set z position of facemesh
+  if (hasVisiblity) {
+    landmarks.forEach(landmark => {
+      let { z, visibility } = landmark;
+      z = -z;
+      if (z < minZ && visibility) {
+        minZ = z
+      }
+    });
+  } else {
+    minZ = Math.max(-landmarks[234].z, -landmarks[454].z);
+  }
+ 
+  return landmarks.map(landmark => {
+    let {x, y, z} = landmark;
+    return {
+      x: -0.5 + x,
+      y: 0.5 - y,
+      z: -z - minZ,
+      visibility: landmark.visibility,
+    }
+  });
+}
+        export { };
+
+    </script>
+
+</body>
+
+</html>
